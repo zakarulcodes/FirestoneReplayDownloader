@@ -7,7 +7,7 @@ name: Rebuild coliseum player
 
 on:
   schedule:
-    - cron: '0 8 * * 1' # Mondays 08:00 UTC
+    - cron: '0 8 * * *' # daily 08:00 UTC (skips fast when upstream is unchanged)
   workflow_dispatch: {} # manual "Run workflow" button
 
 permissions:
