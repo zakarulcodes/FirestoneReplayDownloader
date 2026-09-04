@@ -1,0 +1,294 @@
+diff --git a/apps/coliseum/src/app/app.module.ts b/apps/coliseum/src/app/app.module.ts
+index 4bb2c1a..535c735 100644
+--- a/apps/coliseum/src/app/app.module.ts
++++ b/apps/coliseum/src/app/app.module.ts
+@@ -4,6 +4,7 @@ import { BrowserModule } from '@angular/platform-browser';
+ import { OverlayContainer } from '@angular/cdk/overlay';
+ import { CommonModule } from '@angular/common';
+ import { HttpClient, HttpClientModule } from '@angular/common/http';
++import { AllCardsService } from '@firestone-hs/reference-data';
+ import { ReplayColiseumModule } from '@firestone/replay/coliseum';
+ import { CdkOverlayContainer } from '@firestone/shared/framework/common';
+ import {
+@@ -50,6 +51,9 @@ const httpLoaderFactory: (http: HttpClient) => TranslateHttpLoader = (http: Http
+ 	declarations: [ColiseumAppComponent],
+ 	providers: [
+ 		{ provide: CardsFacadeService, useExisting: CardsFacadeStandaloneService },
++		// Make the replay parser reuse the app's initialized cards instead of creating its own
++		// empty AllCardsService and re-fetching the card DB (mirrors twitch-extension app).
++		{ provide: AllCardsService, useExisting: CardsFacadeStandaloneService },
+ 		{ provide: ILocalizationService, useExisting: LocalizationStandaloneService },
+ 		{ provide: OverlayContainer, useClass: CdkOverlayContainer },
+ 		{ provide: PLAUSIBLE_DOMAIN, useValue: 'replays.firestoneapp.com' },
+diff --git a/apps/coliseum/src/app/coliseum-app.component.html b/apps/coliseum/src/app/coliseum-app.component.html
+index 8f49002..db5cdac 100644
+--- a/apps/coliseum/src/app/coliseum-app.component.html
++++ b/apps/coliseum/src/app/coliseum-app.component.html
+@@ -1,5 +1,17 @@
+ <div class="coliseum-container battlegrounds-theme overlay-container-parent" *ngIf="ready$ | async">
++	<div
++		class="local-picker"
++		*ngIf="localMode"
++		(dragover)="onDragOver($event)"
++		(drop)="onFileDropped($event)"
++	>
++		<h1>Firestone Replay Player</h1>
++		<p>Drop a replay <code>.xml</code> or <code>.xml.zip</code> here, or pick one:</p>
++		<input type="file" accept=".xml,.zip" (change)="onFileSelected($event)" />
++		<p class="error" *ngIf="loadError">Failed: {{ loadError }}</p>
++	</div>
+ 	<fs-coliseum
++		*ngIf="!localMode"
+ 		class="external-player"
+ 		[reviewId]="reviewId"
+ 		[replayXml]="replayXml"
+diff --git a/apps/coliseum/src/app/coliseum-app.component.scss b/apps/coliseum/src/app/coliseum-app.component.scss
+index 1bb2091..336e0bd 100644
+--- a/apps/coliseum/src/app/coliseum-app.component.scss
++++ b/apps/coliseum/src/app/coliseum-app.component.scss
+@@ -11,6 +11,29 @@
+ 	color: var(--color-1);
+ }
+ 
++.local-picker {
++	display: flex;
++	flex-direction: column;
++	align-items: center;
++	justify-content: center;
++	height: 100%;
++	width: 100%;
++	gap: 12px;
++	text-align: center;
++	border: 2px dashed var(--color-3, rgb(222, 222, 222));
++	box-sizing: border-box;
++
++	code {
++		background: rgba(0, 0, 0, 0.3);
++		padding: 1px 5px;
++		border-radius: 4px;
++	}
++
++	.error {
++		color: var(--default-title-color, red);
++	}
++}
++
+ .external-player {
+ 	position: relative;
+ 	width: 75%;
+diff --git a/apps/coliseum/src/app/coliseum-app.component.ts b/apps/coliseum/src/app/coliseum-app.component.ts
+index b8212fa..356ed89 100644
+--- a/apps/coliseum/src/app/coliseum-app.component.ts
++++ b/apps/coliseum/src/app/coliseum-app.component.ts
+@@ -27,6 +27,10 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
+ 	bgsSimulation: GameSample | null;
+ 	initialLocation: ReplayLocation;
+ 
++	// Local-file mode: show a picker when there's no reviewId/simulation to load from the server.
++	localMode = false;
++	loadError: string | null = null;
++
+ 	private ready$$ = new BehaviorSubject<boolean>(false);
+ 
+ 	private bgsSimulationId: string;
+@@ -81,7 +85,11 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
+ 		}
+ 
+ 		if (!reviewId && !bgsSimulationId && !bgsSimulation) {
+-			console.error('[game-replay] no reviewId or bgsSimulationId or bgsSimulation');
++			console.debug('[game-replay] no source param, enabling local file mode');
++			this.localMode = true;
++			if (!(this.cdr as ViewRef).destroyed) {
++				this.cdr.markForCheck();
++			}
+ 			return;
+ 		}
+ 
+@@ -115,6 +123,57 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
+ 		}
+ 	}
+ 
++	onDragOver(event: DragEvent) {
++		event.preventDefault();
++	}
++
++	async onFileDropped(event: DragEvent) {
++		event.preventDefault();
++		const file = event.dataTransfer?.files?.[0];
++		if (file) {
++			await this.loadLocalFile(file);
++		}
++	}
++
++	async onFileSelected(event: Event) {
++		const file = (event.target as HTMLInputElement).files?.[0];
++		if (file) {
++			await this.loadLocalFile(file);
++		}
++	}
++
++	// Reads a local .xml or .xml.zip and feeds it straight into the renderer,
++	// bypassing the reviewId -> server download path entirely.
++	private async loadLocalFile(file: File) {
++		this.loadError = null;
++		try {
++			let xml: string | undefined;
++			if (file.name.toLowerCase().endsWith('.zip')) {
++				const zip = await loadAsync(file);
++				const entry = Object.keys(zip.files)[0];
++				xml = await zip.file(entry)?.async('string');
++			} else {
++				xml = await file.text();
++			}
++			if (!xml) {
++				throw new Error('empty replay file');
++			}
++			// Replays download as a single ~18MB line. The parser splits with regexes whose `.*`
++			// then backtracks across the whole line, which overflows Firefox's regex stack
++			// ("too much recursion"). Break tags onto their own lines so `.*` is bounded per tag.
++			// Whitespace between XML elements is insignificant here (saxes ignores it).
++			xml = xml.replace(/></g, '>\n<');
++			this.replayXml = xml;
++			this.localMode = false;
++		} catch (e: any) {
++			console.error('could not load local replay', e);
++			this.loadError = e?.message ?? 'could not read file';
++		}
++		if (!(this.cdr as ViewRef).destroyed) {
++			this.cdr.markForCheck();
++		}
++	}
++
+ 	onReplayLocationUpdated(location: ReplayLocation) {
+ 		const baseUrl = `${window.location.protocol}//${window.location.host}${window.location.pathname}`;
+ 		const reviewQuery = this.reviewId
+diff --git a/libs/replay/coliseum/src/lib/components/game/anomalies/anomaly-entity.component.ts b/libs/replay/coliseum/src/lib/components/game/anomalies/anomaly-entity.component.ts
+index 1860a15..13148c7 100644
+--- a/libs/replay/coliseum/src/lib/components/game/anomalies/anomaly-entity.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/anomalies/anomaly-entity.component.ts
+@@ -22,7 +22,9 @@ export class AnomalyEntityComponent {
+ 	_entity: Entity;
+ 
+ 	@Input() set entity(value: Entity) {
+-		this.image = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${value.cardID}.jpg`;
++		this.image = value.cardID
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${value.cardID}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 		this._entity = value;
+ 	}
+ }
+diff --git a/libs/replay/coliseum/src/lib/components/game/card/card-enchantment.component.ts b/libs/replay/coliseum/src/lib/components/game/card/card-enchantment.component.ts
+index 74e04c9..58c5cf5 100644
+--- a/libs/replay/coliseum/src/lib/components/game/card/card-enchantment.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/card/card-enchantment.component.ts
+@@ -38,7 +38,9 @@ export class CardEnchantmentComponent {
+ 		}
+ 		this.name = card.name;
+ 		const cardForArt = this.normalizeEnchantment(cardId);
+-		this.art = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardForArt}.jpg`;
++		this.art = cardForArt
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardForArt}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 		this.description = card.text;
+ 	}
+ 
+diff --git a/libs/replay/coliseum/src/lib/components/game/hero/bgs-quest-reward-art.component.ts b/libs/replay/coliseum/src/lib/components/game/hero/bgs-quest-reward-art.component.ts
+index 2c5ef6f..a0fcd84 100644
+--- a/libs/replay/coliseum/src/lib/components/game/hero/bgs-quest-reward-art.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/hero/bgs-quest-reward-art.component.ts
+@@ -11,6 +11,8 @@ export class BgsQuestRewardArtComponent {
+ 	image: string;
+ 
+ 	@Input() set cardId(cardId: string) {
+-		this.image = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardId}.jpg`;
++		this.image = cardId
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardId}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 	}
+ }
+diff --git a/libs/replay/coliseum/src/lib/components/game/hero/hero-art.component.ts b/libs/replay/coliseum/src/lib/components/game/hero/hero-art.component.ts
+index cf96c29..0af4295 100644
+--- a/libs/replay/coliseum/src/lib/components/game/hero/hero-art.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/hero/hero-art.component.ts
+@@ -12,6 +12,8 @@ export class HeroArtComponent {
+ 
+ 	@Input() set cardId(cardId: string | undefined) {
+ 		// console.debug('[hero-art] setting cardId', cardId);
+-		this.image = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardId}.jpg`;
++		this.image = cardId
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardId}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 	}
+ }
+diff --git a/libs/replay/coliseum/src/lib/components/game/hero/hero-power-art.component.ts b/libs/replay/coliseum/src/lib/components/game/hero/hero-power-art.component.ts
+index c162313..0023622 100644
+--- a/libs/replay/coliseum/src/lib/components/game/hero/hero-power-art.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/hero/hero-power-art.component.ts
+@@ -12,6 +12,8 @@ export class HeroPowerArtComponent {
+ 
+ 	@Input() set cardId(cardId: string) {
+ 		// console.debug('[hero-power-art] setting cardId', cardId);
+-		this.image = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardId}.jpg`;
++		this.image = cardId
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardId}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 	}
+ }
+diff --git a/libs/replay/coliseum/src/lib/components/game/hero/tavern-button.component.ts b/libs/replay/coliseum/src/lib/components/game/hero/tavern-button.component.ts
+index 536f1d1..a63211d 100644
+--- a/libs/replay/coliseum/src/lib/components/game/hero/tavern-button.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/hero/tavern-button.component.ts
+@@ -37,7 +37,9 @@ export class TavernButtonComponent {
+ 	@Input() set entity(value: Entity) {
+ 		this.entityId = value ? value.id : undefined;
+ 		this.cardId = value ? value.cardID : undefined;
+-		this.actionSrc = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${this.cardId}.jpg`;
++		this.actionSrc = this.cardId
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${this.cardId}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 		this.cost = value ? value.getTag(GameTag.COST) : undefined;
+ 		if (value && this._entity && value.id !== this._entity.id) {
+ 			this._forceAnimation = true;
+diff --git a/libs/replay/coliseum/src/lib/components/game/hero/weapon-art.component.ts b/libs/replay/coliseum/src/lib/components/game/hero/weapon-art.component.ts
+index 296c5ed..230b8fa 100644
+--- a/libs/replay/coliseum/src/lib/components/game/hero/weapon-art.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/hero/weapon-art.component.ts
+@@ -12,6 +12,8 @@ export class WeaponArtComponent {
+ 
+ 	@Input() set cardId(cardId: string) {
+ 		// console.debug('[weapon-art] setting cardId', cardId);
+-		this.image = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardId}.jpg`;
++		this.image = cardId
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${cardId}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 	}
+ }
+diff --git a/libs/replay/coliseum/src/lib/components/game/leaderboard/leaderboard-entity.component.ts b/libs/replay/coliseum/src/lib/components/game/leaderboard/leaderboard-entity.component.ts
+index a5e5e11..3047652 100644
+--- a/libs/replay/coliseum/src/lib/components/game/leaderboard/leaderboard-entity.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/leaderboard/leaderboard-entity.component.ts
+@@ -40,7 +40,9 @@ export class LeaderboardEntityComponent {
+ 
+ 	@Input() set entity(value: Entity) {
+ 		this._entity = value;
+-		this.image = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${value.cardID}.jpg`;
++		this.image = value.cardID
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${value.cardID}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 		this.updateEntity();
+ 	}
+ 
+diff --git a/libs/replay/coliseum/src/lib/components/game/overlay/end-game.component.ts b/libs/replay/coliseum/src/lib/components/game/overlay/end-game.component.ts
+index e68299a..9ebe7ae 100644
+--- a/libs/replay/coliseum/src/lib/components/game/overlay/end-game.component.ts
++++ b/libs/replay/coliseum/src/lib/components/game/overlay/end-game.component.ts
+@@ -64,6 +64,8 @@ export class EndGameComponent {
+ 			.first();
+ 		const heroEntityId = player?.getTag(GameTag.HERO_ENTITY);
+ 		const hero = this._entities.get(heroEntityId ?? 0);
+-		this.heroImage = `https://static.zerotoheroes.com/hearthstone/cardart/256x/${hero?.cardID}.jpg`;
++		this.heroImage = hero?.cardID
++			? `https://static.zerotoheroes.com/hearthstone/cardart/256x/${hero?.cardID}.jpg`
++			: `https://static.zerotoheroes.com/hearthstone/asset/manastorm/card_unknown.png`;
+ 	}
+ }

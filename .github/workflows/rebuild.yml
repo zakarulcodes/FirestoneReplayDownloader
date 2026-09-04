@@ -1,0 +1,95 @@
+name: Rebuild coliseum player
+
+# Weekly (and on-demand) rebuild of the /play viewer from upstream Firestone.
+# Short-circuits before the heavy build when upstream hasn't changed, and only
+# commits when the built output actually differs. A push here triggers Hostinger
+# auto-deploy.
+
+on:
+  schedule:
+    - cron: '0 8 * * 1' # Mondays 08:00 UTC
+  workflow_dispatch: {} # manual "Run workflow" button
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebuild-coliseum
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/Zero-to-Heroes/firestone.git
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Check upstream for changes
+        id: check
+        run: |
+          UP_SHA=$(git ls-remote "$UPSTREAM" refs/heads/master | cut -f1)
+          LAST=$(cat bot/last-built-sha.txt 2>/dev/null | tr -d '[:space:]')
+          echo "upstream=$UP_SHA" >> "$GITHUB_OUTPUT"
+          echo "upstream master: $UP_SHA"
+          echo "last built:      ${LAST:-<none>}"
+          if [ "$UP_SHA" = "$LAST" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Up to date, skipping build."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clone upstream
+        if: steps.check.outputs.changed == 'true'
+        run: git clone --depth 1 "$UPSTREAM" upstream
+
+      - name: Apply patch
+        if: steps.check.outputs.changed == 'true'
+        working-directory: upstream
+        run: |
+          # Fail loudly if the patch no longer applies (upstream moved our files).
+          git apply --verbose "$GITHUB_WORKSPACE/bot/coliseum.patch"
+
+      - name: Setup Node
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: upstream/package-lock.json
+
+      - name: Install deps
+        if: steps.check.outputs.changed == 'true'
+        working-directory: upstream
+        # --ignore-scripts skips the electron/native postinstall we don't need for
+        # the web build (and which otherwise fails the job).
+        run: npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+
+      - name: Build coliseum
+        if: steps.check.outputs.changed == 'true'
+        working-directory: upstream
+        run: npx nx build coliseum --configuration=production
+
+      - name: Copy build into play/
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          rm -rf play
+          mkdir play
+          cp -r upstream/dist/apps/coliseum/* play/
+          echo "${{ steps.check.outputs.upstream }}" > bot/last-built-sha.txt
+
+      - name: Commit and push if changed
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name  "coliseum-rebuild-bot"
+          git config user.email "actions@github.com"
+          git add play bot/last-built-sha.txt
+          if git diff --cached --quiet; then
+            echo "No output changes, nothing to commit."
+          else
+            git commit -m "Rebuild coliseum player from upstream ${{ steps.check.outputs.upstream }}"
+            git push
+          fi
