@@ -57,16 +57,22 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: upstream/package-lock.json
 
       - name: Install deps
         if: steps.check.outputs.changed == 'true'
         working-directory: upstream
-        # --ignore-scripts skips the electron/native postinstall we don't need for
-        # the web build (and which otherwise fails the job).
-        run: npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+        # --ignore-scripts skips the electron/native postinstall we don't need for the
+        # web build (it otherwise fails the job). Then recreate the two non-electron
+        # postinstall bits the build DOES need: the ow-cli type stub (else TS2688) and
+        # the angular-cli decoration.
+        run: |
+          npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+          node ./decorate-angular-cli.js || true
+          mkdir -p node_modules/@overwolf/ow-cli
+          echo "// stub so TS can resolve the 'ow-cli' types (created by upstream postinstall)" > node_modules/@overwolf/ow-cli/index.d.ts
 
       - name: Build coliseum
         if: steps.check.outputs.changed == 'true'
