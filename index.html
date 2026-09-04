@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Firestone Replay Downloader</title>
+<!-- fflate: unzip the .xml.zip client-side (rung 5: installed-lib beats hand-rolling a zip parser) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fflate/0.8.2/umd/index.min.js"></script>
+<style>
+  :root{color-scheme:dark;--bg:#15171c;--card:#1e2129;--fg:#e6e8ec;--mut:#8b909c;--acc:#f26522;--err:#ff6b6b;--ok:#4cd07d}
+  body{margin:0;font:15px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg);display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}
+  .card{background:var(--card);border-radius:12px;padding:28px;width:100%;max-width:520px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  h1{margin:0 0 4px;font-size:19px}
+  p.sub{margin:0 0 20px;color:var(--mut);font-size:13px}
+  input{width:100%;box-sizing:border-box;padding:11px 13px;border-radius:8px;border:1px solid #333844;background:#12141a;color:var(--fg);font-size:14px}
+  input:focus{outline:none;border-color:var(--acc)}
+  button{margin-top:12px;width:100%;padding:11px;border:0;border-radius:8px;background:var(--acc);color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+  button#zip{background:#2a2e38;color:var(--fg);font-weight:500}
+  button:disabled{opacity:.55;cursor:default}
+  #status{margin-top:16px;font-size:13px;min-height:20px;white-space:pre-wrap}
+  .err{color:var(--err)} .ok{color:var(--ok)} .mut{color:var(--mut)}
+  code{background:#12141a;padding:1px 5px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Firestone Replay Downloader</h1>
+  <p class="sub">Paste a <code>replays.firestoneapp.com</code> link (or a bare reviewId). Saves the raw HSReplay XML.</p>
+  <input id="link" placeholder="https://replays.firestoneapp.com/?reviewId=..." autofocus>
+  <button id="go">Download replay (.xml)</button>
+  <button id="zip">Download raw .zip</button>
+  <div id="status"></div>
+</div>
+<script>
+const META = "https://itkmxena7k2kkmkgpevc6skcie0tlwmk.lambda-url.us-west-2.on.aws/";
+const XML  = "https://xml.firestoneapp.com/";
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+// Accepts a full viewer URL, a ?reviewId=... query, or a bare UUID.
+function extractReviewId(s){ const m = (s||"").match(UUID); return m ? m[0].toLowerCase() : null; }
+
+const $ = id => document.getElementById(id);
+const set = (msg,cls="") => { const el=$("status"); el.textContent=msg; el.className=cls; };
+const save = (bytes,filename,type) => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([bytes],{type}));
+  a.download = filename; a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+// reviewId -> zip bytes (+ its s3 key). Shared by both buttons.
+async function fetchZip(id){
+  set("Looking up replay "+id+" ...","mut");
+  const meta = await (await fetch(META+id)).json();
+  const key = meta.replayKey;
+  if(!key) throw new Error("No replayKey returned (private or expired review?)");
+  set("Downloading "+key.split("/").pop()+" ...","mut");
+  const bytes = new Uint8Array(await (await fetch(XML+key)).arrayBuffer());
+  return {bytes, key};
+}
+
+function run(handler){
+  return async () => {
+    const id = extractReviewId($("link").value.trim());
+    if(!id){ set("Couldn't find a reviewId in that input.","err"); return; }
+    $("go").disabled = $("zip").disabled = true;
+    try{ await handler(id); }
+    catch(e){ set("Failed: "+e.message,"err"); }
+    finally{ $("go").disabled = $("zip").disabled = false; }
+  };
+}
+
+const doXml = run(async id => {
+  const {bytes} = await fetchZip(id);
+  const files = fflate.unzipSync(bytes);          // {name: Uint8Array}
+  const xml = files[Object.keys(files)[0]];
+  save(xml, id+".xml", "application/xml");
+  set("Saved "+id+".xml ("+(xml.length/1e6).toFixed(1)+" MB)","ok");
+});
+
+const doZip = run(async id => {
+  const {bytes} = await fetchZip(id);
+  save(bytes, id+".xml.zip", "application/zip");
+  set("Saved "+id+".xml.zip ("+(bytes.length/1e6).toFixed(1)+" MB)","ok");
+});
+
+$("go").onclick = doXml;
+$("zip").onclick = doZip;
+$("link").addEventListener("keydown", e => { if(e.key==="Enter") doXml(); });
+
+// self-check: the only non-trivial logic is the parser
+console.assert(extractReviewId("https://replays.firestoneapp.com/?reviewId=508da1b8-0806-4b6c-9432-d256abb0919c&source=x")==="508da1b8-0806-4b6c-9432-d256abb0919c","url");
+console.assert(extractReviewId("508DA1B8-0806-4B6C-9432-D256ABB0919C")==="508da1b8-0806-4b6c-9432-d256abb0919c","bare+case");
+console.assert(extractReviewId("nope")===null,"none");
+</script>
+</body>
+</html>
