@@ -21,7 +21,7 @@ index 4bb2c1a..535c735 100644
  		{ provide: OverlayContainer, useClass: CdkOverlayContainer },
  		{ provide: PLAUSIBLE_DOMAIN, useValue: 'replays.firestoneapp.com' },
 diff --git a/apps/coliseum/src/app/coliseum-app.component.html b/apps/coliseum/src/app/coliseum-app.component.html
-index 8f49002..d98e697 100644
+index 8f49002..9f970ca 100644
 --- a/apps/coliseum/src/app/coliseum-app.component.html
 +++ b/apps/coliseum/src/app/coliseum-app.component.html
 @@ -1,5 +1,21 @@
@@ -34,10 +34,10 @@ index 8f49002..d98e697 100644
 +	>
 +		<h1>Firestone Replay Player</h1>
 +		<p>
-+			Drop a replay <code>.xml</code> / <code>.xml.zip</code>, or an HDT
-+			<code>.hdtreplay</code>, here — or pick one:
++			Drop a replay here — Firestone <code>.xml</code> / <code>.xml.zip</code>, or HDT
++			<code>.hdtreplay</code> / <code>.bgreplay</code> — or pick one:
 +		</p>
-+		<input type="file" accept=".xml,.zip,.hdtreplay,.txt,.log" (change)="onFileSelected($event)" />
++		<input type="file" accept=".xml,.zip,.hdtreplay,.bgreplay,.txt,.log" (change)="onFileSelected($event)" />
 +		<p class="status" *ngIf="loadStatus">{{ loadStatus }}</p>
 +		<p class="error" *ngIf="loadError">Failed: {{ loadError }}</p>
 +	</div>
@@ -86,7 +86,7 @@ index 1bb2091..2f21c93 100644
  	position: relative;
  	width: 75%;
 diff --git a/apps/coliseum/src/app/coliseum-app.component.ts b/apps/coliseum/src/app/coliseum-app.component.ts
-index b8212fa..f3d47aa 100644
+index b8212fa..2ad3f6a 100644
 --- a/apps/coliseum/src/app/coliseum-app.component.ts
 +++ b/apps/coliseum/src/app/coliseum-app.component.ts
 @@ -27,6 +27,12 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
@@ -115,7 +115,7 @@ index b8212fa..f3d47aa 100644
  			return;
  		}
  
-@@ -115,6 +125,124 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
+@@ -115,6 +125,146 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
  		}
  	}
  
@@ -146,9 +146,15 @@ index b8212fa..f3d47aa 100644
 +		try {
 +			const lower = file.name.toLowerCase();
 +			let content: string | undefined;
-+			if (lower.endsWith('.zip') || lower.endsWith('.hdtreplay')) {
++			if (lower.endsWith('.zip') || lower.endsWith('.hdtreplay') || lower.endsWith('.bgreplay')) {
 +				const zip = await loadAsync(file);
-+				const entry = Object.keys(zip.files)[0];
++				const names = Object.keys(zip.files);
++				// .bgreplay is {meta.json, power.log}; .hdtreplay is {output_log.txt}. Pick the
++				// log/xml, never meta.json.
++				const entry =
++					names.find((n) => /\.(log|txt|xml)$/i.test(n)) ??
++					names.find((n) => !n.toLowerCase().endsWith('.json')) ??
++					names[0];
 +				content = await zip.file(entry)?.async('string');
 +			} else {
 +				content = await file.text();
@@ -196,11 +202,27 @@ index b8212fa..f3d47aa 100644
 +	private async convertPowerLog(log: string): Promise<string> {
 +		const py = await this.getPyodide();
 +		py.globals.set('LOG_TEXT', log);
-+		const xml: string = await py.runPythonAsync(`import io
++		const xml: string = await py.runPythonAsync(`import io, re
 +from hslog import LogParser
 +from hsreplay.document import HSReplayDocument
++from hslog.exceptions import MissingPlayerData
 +_p = LogParser(); _p.read(io.StringIO(LOG_TEXT)); _p.flush()
-+_xml = HSReplayDocument.from_parser(_p, build=None).to_xml()
++try:
++    _doc = HSReplayDocument.from_parser(_p, build=None)
++except MissingPlayerData as _e:
++    # HDT Battlegrounds logs register players by id but never by name, so hslog
++    # can't link them. Seed the human player (first with a non-zero GameAccountId)
++    # using the name from the error, then retry.
++    _eid = _pid = None
++    for _m in re.finditer(r"Player EntityID=(\\d+) PlayerID=(\\d+) GameAccountId=\\[hi=(\\d+) lo=(\\d+)\\]", LOG_TEXT):
++        _e2, _pi, _hi, _lo = map(int, _m.groups())
++        if _hi or _lo:
++            _eid, _pid = _e2, _pi
++            break
++    _name = str(_e).split("player '")[-1].rstrip("'")
++    _p.player_manager.create_or_update_player(name=_name, entity_id=_eid, player_id=_pid)
++    _doc = HSReplayDocument.from_parser(_p, build=None)
++_xml = _doc.to_xml()
 +"\\n".join(l for l in _xml.splitlines() if not l.lstrip().startswith("<!DOCTYPE"))`);
 +		if (!xml || !xml.includes('<Game ')) {
 +			throw new Error('could not parse Hearthstone log (empty or unsupported)');
