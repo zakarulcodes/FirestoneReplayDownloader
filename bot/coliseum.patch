@@ -21,10 +21,10 @@ index 4bb2c1a..535c735 100644
  		{ provide: OverlayContainer, useClass: CdkOverlayContainer },
  		{ provide: PLAUSIBLE_DOMAIN, useValue: 'replays.firestoneapp.com' },
 diff --git a/apps/coliseum/src/app/coliseum-app.component.html b/apps/coliseum/src/app/coliseum-app.component.html
-index 8f49002..9f970ca 100644
+index 8f49002..db5cdac 100644
 --- a/apps/coliseum/src/app/coliseum-app.component.html
 +++ b/apps/coliseum/src/app/coliseum-app.component.html
-@@ -1,5 +1,21 @@
+@@ -1,5 +1,17 @@
  <div class="coliseum-container battlegrounds-theme overlay-container-parent" *ngIf="ready$ | async">
 +	<div
 +		class="local-picker"
@@ -33,12 +33,8 @@ index 8f49002..9f970ca 100644
 +		(drop)="onFileDropped($event)"
 +	>
 +		<h1>Firestone Replay Player</h1>
-+		<p>
-+			Drop a replay here — Firestone <code>.xml</code> / <code>.xml.zip</code>, or HDT
-+			<code>.hdtreplay</code> / <code>.bgreplay</code> — or pick one:
-+		</p>
-+		<input type="file" accept=".xml,.zip,.hdtreplay,.bgreplay,.txt,.log" (change)="onFileSelected($event)" />
-+		<p class="status" *ngIf="loadStatus">{{ loadStatus }}</p>
++		<p>Drop a replay <code>.xml</code> or <code>.xml.zip</code> here, or pick one:</p>
++		<input type="file" accept=".xml,.zip" (change)="onFileSelected($event)" />
 +		<p class="error" *ngIf="loadError">Failed: {{ loadError }}</p>
 +	</div>
  	<fs-coliseum
@@ -47,10 +43,10 @@ index 8f49002..9f970ca 100644
  		[reviewId]="reviewId"
  		[replayXml]="replayXml"
 diff --git a/apps/coliseum/src/app/coliseum-app.component.scss b/apps/coliseum/src/app/coliseum-app.component.scss
-index 1bb2091..2f21c93 100644
+index 1bb2091..336e0bd 100644
 --- a/apps/coliseum/src/app/coliseum-app.component.scss
 +++ b/apps/coliseum/src/app/coliseum-app.component.scss
-@@ -11,6 +11,34 @@
+@@ -11,6 +11,29 @@
  	color: var(--color-1);
  }
  
@@ -72,11 +68,6 @@ index 1bb2091..2f21c93 100644
 +		border-radius: 4px;
 +	}
 +
-+	.status {
-+		opacity: 0.8;
-+		font-style: italic;
-+	}
-+
 +	.error {
 +		color: var(--default-title-color, red);
 +	}
@@ -86,23 +77,21 @@ index 1bb2091..2f21c93 100644
  	position: relative;
  	width: 75%;
 diff --git a/apps/coliseum/src/app/coliseum-app.component.ts b/apps/coliseum/src/app/coliseum-app.component.ts
-index b8212fa..2ad3f6a 100644
+index b8212fa..c371ec6 100644
 --- a/apps/coliseum/src/app/coliseum-app.component.ts
 +++ b/apps/coliseum/src/app/coliseum-app.component.ts
-@@ -27,6 +27,12 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
+@@ -27,6 +27,10 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
  	bgsSimulation: GameSample | null;
  	initialLocation: ReplayLocation;
  
 +	// Local-file mode: show a picker when there's no reviewId/simulation to load from the server.
 +	localMode = false;
 +	loadError: string | null = null;
-+	loadStatus: string | null = null;
-+	private pyodidePromise: Promise<any> | null = null;
 +
  	private ready$$ = new BehaviorSubject<boolean>(false);
  
  	private bgsSimulationId: string;
-@@ -81,7 +87,11 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
+@@ -81,7 +85,11 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
  		}
  
  		if (!reviewId && !bgsSimulationId && !bgsSimulation) {
@@ -115,7 +104,7 @@ index b8212fa..2ad3f6a 100644
  			return;
  		}
  
-@@ -115,6 +125,146 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
+@@ -115,6 +123,57 @@ export class ColiseumAppComponent implements AfterContentInit, AfterViewInit {
  		}
  	}
  
@@ -138,125 +127,36 @@ index b8212fa..2ad3f6a 100644
 +		}
 +	}
 +
-+	// Reads a local replay and feeds it straight into the renderer, bypassing the
-+	// reviewId -> server download path. Accepts HSReplay XML (.xml / zipped), and
-+	// HDT .hdtreplay / raw Power.log, which are converted to XML in-browser.
++	// Reads a local HSReplay replay (.xml or a .xml.zip, e.g. from the downloader or
++	// the HDT Firestone-format plugin) and feeds it straight into the renderer,
++	// bypassing the reviewId -> server download path.
 +	private async loadLocalFile(file: File) {
 +		this.loadError = null;
 +		try {
-+			const lower = file.name.toLowerCase();
-+			let content: string | undefined;
-+			if (lower.endsWith('.zip') || lower.endsWith('.hdtreplay') || lower.endsWith('.bgreplay')) {
++			let xml: string | undefined;
++			if (file.name.toLowerCase().endsWith('.zip')) {
 +				const zip = await loadAsync(file);
-+				const names = Object.keys(zip.files);
-+				// .bgreplay is {meta.json, power.log}; .hdtreplay is {output_log.txt}. Pick the
-+				// log/xml, never meta.json.
-+				const entry =
-+					names.find((n) => /\.(log|txt|xml)$/i.test(n)) ??
-+					names.find((n) => !n.toLowerCase().endsWith('.json')) ??
-+					names[0];
-+				content = await zip.file(entry)?.async('string');
++				const entry = Object.keys(zip.files)[0];
++				xml = await zip.file(entry)?.async('string');
 +			} else {
-+				content = await file.text();
++				xml = await file.text();
 +			}
-+			if (!content) {
++			if (!xml) {
 +				throw new Error('empty replay file');
 +			}
-+
-+			// HDT stores the raw Hearthstone Power.log, not HSReplay XML. Convert it in-browser.
-+			let xml: string;
-+			if (this.looksLikeXml(content)) {
-+				xml = content;
-+			} else {
-+				this.loadStatus = 'Converting Hearthstone log (first time downloads the converter)…';
-+				if (!(this.cdr as ViewRef).destroyed) {
-+					this.cdr.markForCheck();
-+				}
-+				xml = await this.convertPowerLog(content);
-+			}
-+
 +			// Replays are a single ~18MB line; the parser's regex `.*` backtracks across the whole
 +			// line and overflows Firefox's regex stack ("too much recursion"). Break tags onto
 +			// their own lines so `.*` is bounded per tag (saxes ignores inter-element whitespace).
 +			xml = xml.replace(/></g, '>\n<');
-+			this.loadStatus = null;
 +			this.replayXml = xml;
 +			this.localMode = false;
 +		} catch (e: any) {
 +			console.error('could not load local replay', e);
-+			this.loadStatus = null;
 +			this.loadError = e?.message ?? 'could not read file';
 +		}
 +		if (!(this.cdr as ViewRef).destroyed) {
 +			this.cdr.markForCheck();
 +		}
-+	}
-+
-+	private looksLikeXml(content: string): boolean {
-+		const head = content.slice(0, 200).trimStart();
-+		return head.startsWith('<?xml') || head.startsWith('<HSReplay') || head.includes('<Game');
-+	}
-+
-+	// Convert a raw Hearthstone Power.log to HSReplay XML using HearthSim's Python
-+	// parser, run in the browser via Pyodide (loaded on demand, only for log files).
-+	private async convertPowerLog(log: string): Promise<string> {
-+		const py = await this.getPyodide();
-+		py.globals.set('LOG_TEXT', log);
-+		const xml: string = await py.runPythonAsync(`import io, re
-+from hslog import LogParser
-+from hsreplay.document import HSReplayDocument
-+from hslog.exceptions import MissingPlayerData
-+_p = LogParser(); _p.read(io.StringIO(LOG_TEXT)); _p.flush()
-+try:
-+    _doc = HSReplayDocument.from_parser(_p, build=None)
-+except MissingPlayerData as _e:
-+    # HDT Battlegrounds logs register players by id but never by name, so hslog
-+    # can't link them. Seed the human player (first with a non-zero GameAccountId)
-+    # using the name from the error, then retry.
-+    _eid = _pid = None
-+    for _m in re.finditer(r"Player EntityID=(\\d+) PlayerID=(\\d+) GameAccountId=\\[hi=(\\d+) lo=(\\d+)\\]", LOG_TEXT):
-+        _e2, _pi, _hi, _lo = map(int, _m.groups())
-+        if _hi or _lo:
-+            _eid, _pid = _e2, _pi
-+            break
-+    _name = str(_e).split("player '")[-1].rstrip("'")
-+    _p.player_manager.create_or_update_player(name=_name, entity_id=_eid, player_id=_pid)
-+    _doc = HSReplayDocument.from_parser(_p, build=None)
-+_xml = _doc.to_xml()
-+"\\n".join(l for l in _xml.splitlines() if not l.lstrip().startswith("<!DOCTYPE"))`);
-+		if (!xml || !xml.includes('<Game ')) {
-+			throw new Error('could not parse Hearthstone log (empty or unsupported)');
-+		}
-+		return xml;
-+	}
-+
-+	private getPyodide(): Promise<any> {
-+		if (!this.pyodidePromise) {
-+			this.pyodidePromise = (async () => {
-+				await this.loadScript('https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js');
-+				const py = await (window as any).loadPyodide();
-+				await py.loadPackage('micropip');
-+				// setuptools: hsreplay imports pkg_resources at import time.
-+				await py.runPythonAsync(`import micropip
-+await micropip.install(['setuptools', 'hsreplay'])`);
-+				return py;
-+			})();
-+		}
-+		return this.pyodidePromise;
-+	}
-+
-+	private loadScript(src: string): Promise<void> {
-+		return new Promise((resolve, reject) => {
-+			if (document.querySelector(`script[src="${src}"]`)) {
-+				resolve();
-+				return;
-+			}
-+			const s = document.createElement('script');
-+			s.src = src;
-+			s.onload = () => resolve();
-+			s.onerror = () => reject(new Error('failed to load ' + src));
-+			document.head.appendChild(s);
-+		});
 +	}
 +
  	onReplayLocationUpdated(location: ReplayLocation) {

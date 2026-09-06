@@ -29,6 +29,7 @@ def convert_log(log_text: str) -> str:
     parser = LogParser()
     parser.read(io.StringIO(log_text))
     parser.flush()
+    friendly_name = None
     try:
         doc = HSReplayDocument.from_parser(parser, build=None)
     except MissingPlayerData as e:
@@ -41,13 +42,65 @@ def convert_log(log_text: str) -> str:
             if hi or lo:
                 eid, pid = e_id, p_id
                 break
-        name = str(e).split("player '")[-1].rstrip("'")
-        parser.player_manager.create_or_update_player(name=name, entity_id=eid, player_id=pid)
+        friendly_name = str(e).split("player '")[-1].rstrip("'")
+        parser.player_manager.create_or_update_player(name=friendly_name, entity_id=eid, player_id=pid)
         doc = HSReplayDocument.from_parser(parser, build=None)
-    xml = doc.to_xml()
-    # Drop the DOCTYPE (external DTD reference) so the output matches the shape of
-    # Firestone's replay XML; the coliseum viewer doesn't want the DTD.
+    return _match_firestone_shape(doc.to_xml(), friendly_name)
+
+
+def _match_firestone_shape(xml: str, friendly_name: str | None) -> str:
+    # The coliseum viewer parses card ids with brittle, order-sensitive regexes, reads
+    # gameType/formatType off <Game>, and expects <Player name=...>. hsreplay's output
+    # differs for BG logs, so nudge it into Firestone's shape:
+    # 1) ShowEntity: hsreplay emits entity="" cardID="", coliseum's regex wants
+    #    cardID="" entity="" (else its .match returns null and the parser crashes).
+    xml = re.sub(r'<ShowEntity entity="([^"]*)" cardID="([^"]*)"', r'<ShowEntity cardID="\2" entity="\1"', xml)
+    # 2) hsreplay omits gameType/formatType; without them BG renders as a normal game.
+    game_type = "23" if "TB_BaconShop" in xml else "7"  # 23 = GT_BATTLEGROUNDS
+    fmt = "1" if game_type == "23" else "2"
+    xml = xml.replace("<Game ", f'<Game gameType="{game_type}" formatType="{fmt}" ', 1)
+    # 3) BG logs have no player names, so hsreplay's <Player> lacks name/isMainPlayer,
+    #    which coliseum's initializePlayer dereferences. Inject them (friendly = the
+    #    player with a non-zero account id).
+    xml = _add_player_names(xml, friendly_name or "Player")
+    # 4) coliseum's MAIN_READY parser does `entities.filter(CURRENT_PLAYER==1).first().playerId`
+    #    and crashes when no entity is current. In BG recruit phases hsreplay leaves both
+    #    players CURRENT_PLAYER=0, so keep the human player current throughout (Firestone
+    #    never has an empty MAIN_READY). ponytail: heuristic, pins current player to the
+    #    human; fine for a solo BG view.
+    xml = _force_current_player(xml)
+    # Drop the DOCTYPE (external DTD) so the shape matches Firestone's replay XML.
     return "\n".join(l for l in xml.splitlines() if not l.lstrip().startswith("<!DOCTYPE"))
+
+
+def _force_current_player(xml: str) -> str:
+    m = re.search(r'<Player id="(\d+)"[^>]*accountHi="(\d+)" accountLo="(\d+)"', xml)
+    # fall back to first player if the human can't be identified
+    main_id = None
+    for pm in re.finditer(r'<Player id="(\d+)"[^>]*accountHi="(\d+)" accountLo="(\d+)"', xml):
+        if pm.group(2) != "0" or pm.group(3) != "0":
+            main_id = pm.group(1)
+            break
+    if main_id is None:
+        return xml
+    # start current
+    xml = re.sub(rf'(<Player id="{main_id}"[^>]*>)', r'\1<Tag tag="23" value="1"/>', xml, count=1)
+    # never drop to 0
+    xml = re.sub(rf'(<TagChange entity="{main_id}" tag="23" value=)"0"', r'\g<1>"1"', xml)
+    return xml
+
+
+def _add_player_names(xml: str, friendly_name: str) -> str:
+    def repl(m: "re.Match[str]") -> str:
+        tag = m.group(0)
+        if "name=" in tag:  # constructed logs already carry names
+            return tag
+        acct = re.search(r'accountHi="(\d+)" accountLo="(\d+)"', tag)
+        friendly = bool(acct) and (acct.group(1) != "0" or acct.group(2) != "0")
+        name = friendly_name if friendly else "Opponent"
+        return tag[:-1] + f' name="{name}" isMainPlayer="{"true" if friendly else "false"}">'
+
+    return re.sub(r"<Player [^>]*>", repl, xml)
 
 
 def read_power_log(replay_path: str) -> str:
